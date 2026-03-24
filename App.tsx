@@ -37,21 +37,30 @@ export default function App() {
   // On every launch, check stored driver identity and refresh the push token
   useEffect(() => {
     async function initApp() {
-      const driverId = await AsyncStorage.getItem("driverId");
+      try {
+        const driverId = await AsyncStorage.getItem("driverId");
 
-      if (driverId) {
-        // Driver already identified — refresh push token silently
-        const token = await registerForPushNotificationsAsync();
-        if (token) {
-          await supabase
-            .from("drivers")
-            .update({ expo_push_token: token })
-            .eq("id", driverId);
+        if (driverId) {
+          // Driver already identified — refresh push token silently
+          try {
+            const token = await registerForPushNotificationsAsync();
+            if (token) {
+              await supabase
+                .from("drivers")
+                .update({ expo_push_token: token })
+                .eq("id", driverId);
+            }
+          } catch (e) {
+            // Token refresh failed (network/permission error) — proceed anyway
+            console.warn("Push token refresh failed:", e);
+          }
+          setInitialRoute("Orders");
         }
-        setInitialRoute("Orders");
+      } catch (e) {
+        console.warn("initApp error:", e);
+      } finally {
+        setIsLoading(false);
       }
-
-      setIsLoading(false);
     }
 
     initApp();
