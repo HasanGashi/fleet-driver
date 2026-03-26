@@ -12,7 +12,13 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "LSApplicationQueriesSchemes": [
+          "com.sygic.aura",
+          "tomtomgo"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {

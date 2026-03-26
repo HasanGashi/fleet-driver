@@ -10,9 +10,18 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import MapView, { Marker, PROVIDER_DEFAULT } from "react-native-maps";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { supabase } from "../lib/supabase";
 import { RootStackParamList } from "../types/navigation";
+import {
+  geocodeAddress,
+  fetchTruckRoute,
+  openTruckNav,
+  formatDistance,
+  formatDuration,
+  RouteResult,
+} from "../lib/navigation";
 
 type Props = NativeStackScreenProps<RootStackParamList, "OrderDetail">;
 
@@ -39,14 +48,12 @@ const STATUS_CONFIG: Record<
 };
 
 const NEXT_STATUS: Record<string, string> = {
-  assigned: "picked_up",
-  picked_up: "in_transit",
+  assigned: "in_transit",
   in_transit: "delivered",
 };
 
 const NEXT_BUTTON_LABEL: Record<string, string> = {
   assigned: "✅  Mark Picked Up",
-  picked_up: "🚛  Mark In Transit",
   in_transit: "📦  Mark Delivered",
 };
 
@@ -61,6 +68,28 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
   const [updating, setUpdating] = useState(false);
   const toastOpacity = useRef(new Animated.Value(0)).current;
   const [toastMessage, setToastMessage] = useState("");
+
+  // Navigation / routing state
+  const [routeResult, setRouteResult] = useState<RouteResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [pickupCoords, setPickupCoords] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
+  const [destCoords, setDestCoords] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
+  const [resolvedLabels, setResolvedLabels] = useState<{
+    pickup: string;
+    delivery: string;
+  } | null>(null);
+  const mapRef = useRef<MapView>(null);
+
+  // Which coords to show on the map / deep-link based on current status:
+  // assigned  → go to pickup first
+  // picked_up / in_transit → go to delivery
+  const navCoords = order?.status === "assigned" ? pickupCoords : destCoords;
 
   const fetchOrder = useCallback(async () => {
     const { data, error } = await supabase
@@ -79,9 +108,63 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     setLoading(false);
   }, [orderId]);
 
+  const loadRoute = useCallback(
+    async (pickupAddress: string, deliveryAddress: string, status: string) => {
+      if (status === "delivered") return;
+      setRouteLoading(true);
+      try {
+        const [originCoords, destCoords] = await Promise.all([
+          geocodeAddress(pickupAddress),
+          geocodeAddress(deliveryAddress),
+        ]);
+
+        if (!destCoords) {
+          showToast("Could not get coordinates for the delivery address");
+          setRouteLoading(false);
+          return;
+        }
+        if (originCoords) setPickupCoords(originCoords);
+        setDestCoords(destCoords);
+        setResolvedLabels({
+          pickup: originCoords?.title ?? pickupAddress,
+          delivery: destCoords.title,
+        });
+        console.log("[loadRoute] pickup resolved:", originCoords?.title);
+        console.log("[loadRoute] delivery resolved:", destCoords.title);
+
+        // Use pickup address as origin; fall back to delivery coords if pickup geocoding fails
+        const origin = originCoords ?? destCoords;
+
+        const result = await fetchTruckRoute(
+          origin.lat,
+          origin.lon,
+          destCoords.lat,
+          destCoords.lon,
+        );
+        if (!result) {
+          showToast("Could not compute truck route — check your connection");
+        } else {
+          setRouteResult(result);
+        }
+      } catch (err) {
+        console.error("[loadRoute] error:", err);
+        showToast("Could not compute truck route — check your connection");
+      }
+      setRouteLoading(false);
+    },
+    [],
+  );
+
   useEffect(() => {
     fetchOrder();
   }, [fetchOrder]);
+
+  // Load truck route once order is available
+  useEffect(() => {
+    if (order) {
+      loadRoute(order.pickup_address, order.delivery_address, order.status);
+    }
+  }, [order?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update header title once order is loaded
   useEffect(() => {
@@ -172,6 +255,123 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
           <Text style={styles.sectionLabel}>Deliver to</Text>
           <Text style={styles.sectionValue}>{order.delivery_address}</Text>
         </View>
+
+        {/* Truck route map preview */}
+        {!isDelivered && (
+          <View style={styles.mapContainer}>
+            {routeLoading ? (
+              <View style={styles.mapPlaceholder}>
+                <ActivityIndicator size="small" color="#2563EB" />
+                <Text style={styles.mapLoadingText}>
+                  Computing truck route…
+                </Text>
+              </View>
+            ) : routeResult && navCoords ? (
+              <>
+                {/* Contextual heading — tells driver where to go next */}
+                <View
+                  style={[
+                    styles.navHeading,
+                    order?.status === "assigned"
+                      ? styles.navHeadingPickup
+                      : styles.navHeadingDelivery,
+                  ]}
+                >
+                  <Text style={styles.navHeadingText}>
+                    {order?.status === "assigned"
+                      ? "📍 Go to Pickup"
+                      : "📦 Go to Delivery"}
+                  </Text>
+                </View>
+
+                {/* Stats row */}
+                <View style={styles.routeSummary}>
+                  <Text style={styles.routeSummaryDist}>
+                    {formatDistance(routeResult.distanceMeters)}
+                  </Text>
+                  <Text style={styles.routeSummaryDot}>·</Text>
+                  <Text style={styles.routeSummaryEta}>
+                    est. {formatDuration(routeResult.durationSeconds)}
+                  </Text>
+                </View>
+
+                {/* Resolved address labels so driver can spot geocoding mistakes */}
+                {resolvedLabels && (
+                  <View style={styles.resolvedLabels}>
+                    <Text style={styles.resolvedLabelRow} numberOfLines={1}>
+                      <Text style={styles.resolvedLabelKey}>From </Text>
+                      {resolvedLabels.pickup}
+                    </Text>
+                    <Text style={styles.resolvedLabelRow} numberOfLines={1}>
+                      <Text style={styles.resolvedLabelKey}>To    </Text>
+                      {resolvedLabels.delivery}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Pin map — shows pickup when assigned, delivery otherwise */}
+                <MapView
+                  ref={mapRef}
+                  style={styles.map}
+                  provider={PROVIDER_DEFAULT}
+                  region={{
+                    latitude: navCoords.lat,
+                    longitude: navCoords.lon,
+                    latitudeDelta: 0.05,
+                    longitudeDelta: 0.05,
+                  }}
+                  scrollEnabled
+                  zoomEnabled
+                  pitchEnabled={false}
+                  rotateEnabled={false}
+                >
+                  <Marker
+                    coordinate={{
+                      latitude: navCoords.lat,
+                      longitude: navCoords.lon,
+                    }}
+                    pinColor={
+                      order?.status === "assigned" ? "#F59E0B" : "#2563EB"
+                    }
+                  />
+                </MapView>
+              </>
+            ) : null}
+
+            {/* Navigation buttons */}
+            {navCoords && !routeLoading && (
+              <View style={styles.navButtons}>
+                <TouchableOpacity
+                  style={styles.navButton}
+                  onPress={() =>
+                    openTruckNav(navCoords.lat, navCoords.lon, "sygic")
+                  }
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.navButtonText}>
+                    🚛 Navigate (Sygic Truck)
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.navButton, styles.navButtonSecondary]}
+                  onPress={() =>
+                    openTruckNav(navCoords.lat, navCoords.lon, "tomtom")
+                  }
+                  activeOpacity={0.8}
+                >
+                  <Text
+                    style={[
+                      styles.navButtonText,
+                      styles.navButtonTextSecondary,
+                    ]}
+                  >
+                    🚛 Navigate (TomTom GO Truck)
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={styles.divider} />
 
@@ -314,4 +514,70 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   toastText: { color: "#fff", fontSize: 14, fontWeight: "500" },
+  // Route map
+  mapContainer: {
+    marginTop: 16,
+    marginBottom: 8,
+    borderRadius: 12,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+  },
+  map: { width: "100%", height: 280 },
+  mapPlaceholder: {
+    height: 200,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#F1F5F9",
+    gap: 8,
+  },
+  mapLoadingText: { fontSize: 13, color: "#64748B" },
+  routeSummary: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#EFF6FF",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#BFDBFE",
+  },
+  routeSummaryDist: { fontSize: 15, fontWeight: "700", color: "#1D4ED8" },
+  routeSummaryDot: { fontSize: 15, color: "#93C5FD" },
+  routeSummaryEta: { fontSize: 15, fontWeight: "500", color: "#1E40AF" },
+  navButtons: { gap: 8, padding: 12, backgroundColor: "#F8FAFC" },
+  navHeading: {
+    paddingVertical: 8,
+    alignItems: "center" as const,
+  },
+  navHeadingPickup: { backgroundColor: "#FFFBEB" },
+  navHeadingDelivery: { backgroundColor: "#EFF6FF" },
+  navHeadingText: {
+    fontSize: 13,
+    fontWeight: "700" as const,
+    letterSpacing: 0.3,
+  },
+  resolvedLabels: {
+    backgroundColor: "#FFFBEB",
+    borderBottomWidth: 1,
+    borderBottomColor: "#FDE68A",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 2,
+  },
+  resolvedLabelRow: { fontSize: 11, color: "#92400E" },
+  resolvedLabelKey: { fontWeight: "700", color: "#B45309" },
+  navButton: {
+    backgroundColor: "#2563EB",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  navButtonSecondary: {
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1,
+    borderColor: "#CBD5E1",
+  },
+  navButtonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  navButtonTextSecondary: { color: "#1E293B" },
 });

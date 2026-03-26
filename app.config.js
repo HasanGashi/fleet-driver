@@ -15,5 +15,13 @@ export default ({ config }) => ({
     ...config.extra,
     supabaseUrl: process.env.EXPO_PUBLIC_SUPABASE_URL,
     supabaseAnonKey: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+    hereApiKey: process.env.HERE_API_KEY,
+    truck: {
+      height: 300,
+      width: 220,
+      length: 750,
+      weight: 7500,
+      axleCount: 2,
+    },
   },
 });
