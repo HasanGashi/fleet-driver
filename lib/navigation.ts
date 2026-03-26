@@ -1,6 +1,7 @@
 import * as Linking from "expo-linking";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
+import { supabase } from "./supabase";
 
 export interface TruckProfile {
   height: number;
@@ -28,6 +29,75 @@ function getHereApiKey(): string {
   return Constants.expoConfig?.extra?.hereApiKey ?? "";
 }
 
+// ─── In-memory caches (live for the app session) ────────────────────────────
+// Keyed by the raw address string. Means identical addresses across different
+// orders are never geocoded more than once per session.
+const geocodeCache = new Map<
+  string,
+  { lat: number; lon: number; title: string }
+>();
+
+// Keyed by "pickupLat,pickupLon->destLat,destLon" so the same origin/dest pair
+// is never routed more than once per session.
+const routeCache = new Map<string, RouteResult>();
+
+// ─── DB-backed route cache helpers ──────────────────────────────────────────
+
+/** Round coordinate to 4 decimal places (~11 m) for stable DB key matching. */
+function roundCoord(v: number): number {
+  return Math.round(v * 10000) / 10000;
+}
+
+async function fetchRouteFromDB(
+  oLat: number,
+  oLon: number,
+  dLat: number,
+  dLon: number,
+): Promise<RouteResult | null> {
+  const { data, error } = await supabase
+    .from("route_cache")
+    .select("distance_m, duration_s, polyline")
+    .eq("origin_lat", roundCoord(oLat))
+    .eq("origin_lon", roundCoord(oLon))
+    .eq("dest_lat", roundCoord(dLat))
+    .eq("dest_lon", roundCoord(dLon))
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return {
+    distanceMeters: data.distance_m as number,
+    durationSeconds: data.duration_s as number,
+    polyline: data.polyline as { lat: number; lon: number }[],
+  };
+}
+
+function saveRouteToDB(
+  oLat: number,
+  oLon: number,
+  dLat: number,
+  dLon: number,
+  route: RouteResult,
+): void {
+  supabase
+    .from("route_cache")
+    .upsert(
+      {
+        origin_lat: roundCoord(oLat),
+        origin_lon: roundCoord(oLon),
+        dest_lat: roundCoord(dLat),
+        dest_lon: roundCoord(dLon),
+        distance_m: route.distanceMeters,
+        duration_s: route.durationSeconds,
+        polyline: route.polyline,
+      },
+      { onConflict: "origin_lat,origin_lon,dest_lat,dest_lon" },
+    )
+    .then(({ error }) => {
+      if (error) console.error("[route_cache] DB save failed:", error.message);
+      else console.log("[route_cache] saved to DB");
+    });
+}
+
 /**
  * Geocodes a free-text address to {lat, lon} using HERE Geocoding API.
  * Returns null if geocoding fails.
@@ -35,6 +105,12 @@ function getHereApiKey(): string {
 export async function geocodeAddress(
   address: string,
 ): Promise<{ lat: number; lon: number; title: string } | null> {
+  const cached = geocodeCache.get(address);
+  if (cached) {
+    console.log("[geocodeAddress] cache hit:", address);
+    return cached;
+  }
+
   const apiKey = getHereApiKey();
   if (!apiKey) return null;
 
@@ -53,11 +129,13 @@ export async function geocodeAddress(
     return null;
   }
 
-  return {
+  const result = {
     lat: item.position.lat,
     lon: item.position.lng,
     title: item.title as string,
   };
+  geocodeCache.set(address, result);
+  return result;
 }
 
 /**
@@ -153,8 +231,31 @@ export async function fetchTruckRoute(
   });
 
   const url = `https://router.hereapi.com/v8/routes?${params.toString()}`;
+  const cacheKey = `${originLat},${originLon}->${destLat},${destLon}`;
+
+  // 1. In-memory cache (fastest — same session)
+  const cached = routeCache.get(cacheKey);
+  if (cached) {
+    console.log("[fetchTruckRoute] memory cache hit:", cacheKey);
+    return cached;
+  }
+
+  // 2. DB cache (survives app restarts & shared across orders)
+  const dbResult = await fetchRouteFromDB(
+    originLat,
+    originLon,
+    destLat,
+    destLon,
+  );
+  if (dbResult) {
+    console.log("[fetchTruckRoute] DB cache hit:", cacheKey);
+    routeCache.set(cacheKey, dbResult); // warm in-memory cache for this session
+    return dbResult;
+  }
+
+  // 3. HERE API (last resort — costs money)
   console.log(
-    `[fetchTruckRoute] origin=(${originLat},${originLon}) dest=(${destLat},${destLon})`,
+    `[fetchTruckRoute] HERE API call origin=(${originLat},${originLon}) dest=(${destLat},${destLon})`,
   );
   const res = await fetch(url);
   if (!res.ok) {
@@ -177,7 +278,14 @@ export async function fetchTruckRoute(
   const distanceMeters: number = section.summary?.length ?? 0;
   const durationSeconds: number = section.summary?.duration ?? 0;
 
-  return { polyline, distanceMeters, durationSeconds };
+  const routeResult: RouteResult = {
+    polyline,
+    distanceMeters,
+    durationSeconds,
+  };
+  routeCache.set(cacheKey, routeResult); // in-memory
+  saveRouteToDB(originLat, originLon, destLat, destLon, routeResult); // DB (fire-and-forget)
+  return routeResult;
 }
 
 /**
