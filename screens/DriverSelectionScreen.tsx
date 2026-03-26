@@ -11,9 +11,11 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import * as Location from "expo-location";
 import { supabase } from "../lib/supabase";
 import { registerForPushNotificationsAsync } from "../lib/notifications";
 import { RootStackParamList } from "../types/navigation";
+import { LOCATION_TASK } from "../index";
 
 type Props = NativeStackScreenProps<RootStackParamList, "DriverSelection">;
 
@@ -66,6 +68,31 @@ export default function DriverSelectionScreen({ navigation }: Props) {
         .from("drivers")
         .update({ expo_push_token: token })
         .eq("id", selectedDriverId);
+    }
+
+    // Request location permissions and start background GPS tracking
+    try {
+      const { status: fgStatus } =
+        await Location.requestForegroundPermissionsAsync();
+      if (fgStatus === "granted") {
+        const { status: bgStatus } =
+          await Location.requestBackgroundPermissionsAsync();
+        if (bgStatus === "granted") {
+          const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(
+            LOCATION_TASK,
+          ).catch(() => false);
+          if (!alreadyRunning) {
+            await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+              accuracy: Location.Accuracy.Balanced,
+              timeInterval: 30000, // 30 seconds
+              distanceInterval: 50, // or every 50 m, whichever comes first
+              showsBackgroundLocationIndicator: true,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[GPS] Could not start location tracking:", err);
     }
 
     navigation.replace("Orders");

@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import MapView, { Marker, PROVIDER_DEFAULT } from "react-native-maps";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import * as Location from "expo-location";
 import { supabase } from "../lib/supabase";
 import { RootStackParamList } from "../types/navigation";
 import {
@@ -22,6 +23,7 @@ import {
   formatDuration,
   RouteResult,
 } from "../lib/navigation";
+import { LOCATION_TASK } from "../index";
 
 type Props = NativeStackScreenProps<RootStackParamList, "OrderDetail">;
 
@@ -207,6 +209,20 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     } else {
       setOrder({ ...order, status: nextStatus });
       showToast("Status updated!");
+
+      // Stop background GPS tracking once the order is delivered
+      if (nextStatus === "delivered") {
+        try {
+          const isRunning = await Location.hasStartedLocationUpdatesAsync(
+            LOCATION_TASK,
+          ).catch(() => false);
+          if (isRunning) {
+            await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+          }
+        } catch (err) {
+          console.warn("[GPS] Could not stop location tracking:", err);
+        }
+      }
     }
     setUpdating(false);
   }

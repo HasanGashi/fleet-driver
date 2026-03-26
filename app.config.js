@@ -10,7 +10,33 @@ export default ({ config }) => ({
         color: "#ffffff",
       },
     ],
+    [
+      "expo-location",
+      {
+        locationAlwaysAndWhenInUsePermission:
+          "FleetManager needs your location to track deliveries in the background.",
+        locationWhenInUsePermission:
+          "FleetManager needs your location to show your position on the fleet map.",
+        isAndroidBackgroundLocationEnabled: true,
+        isAndroidForegroundServiceEnabled: true,
+      },
+    ],
   ],
+  ios: {
+    ...config.ios,
+    infoPlist: {
+      ...config.ios?.infoPlist,
+      NSLocationAlwaysAndWhenInUseUsageDescription:
+        "FleetManager needs your location to track deliveries in the background.",
+      NSLocationWhenInUseUsageDescription:
+        "FleetManager needs your location to show your position on the fleet map.",
+      UIBackgroundModes: [
+        ...(config.ios?.infoPlist?.UIBackgroundModes ?? []),
+        "location",
+        "fetch",
+      ],
+    },
+  },
   extra: {
     ...config.extra,
     supabaseUrl: process.env.EXPO_PUBLIC_SUPABASE_URL,
