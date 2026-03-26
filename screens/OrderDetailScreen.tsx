@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Image,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -12,6 +13,8 @@ import {
 } from "react-native";
 import MapView, { Marker, PROVIDER_DEFAULT } from "react-native-maps";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { File as FSFile } from "expo-file-system";
+import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { supabase } from "../lib/supabase";
 import { RootStackParamList } from "../types/navigation";
@@ -68,6 +71,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const [proofPhotoUri, setProofPhotoUri] = useState<string | null>(null);
   const toastOpacity = useRef(new Animated.Value(0)).current;
   const [toastMessage, setToastMessage] = useState("");
 
@@ -193,21 +197,92 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     ]).start();
   }
 
+  async function handleAttachPhoto() {
+    // Try camera first; fall back to library if user denies camera
+    const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+    let result: ImagePicker.ImagePickerResult;
+
+    if (cameraPermission.granted) {
+      result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        quality: 0.7,
+        allowsEditing: false,
+      });
+    } else {
+      const libraryPermission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!libraryPermission.granted) {
+        showToast("Camera / photo library permission denied");
+        return;
+      }
+      result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        quality: 0.7,
+        allowsEditing: false,
+      });
+    }
+
+    if (!result.canceled && result.assets.length > 0) {
+      setProofPhotoUri(result.assets[0].uri);
+    }
+  }
+
   async function handleAdvanceStatus() {
     if (!order) return;
     const nextStatus = NEXT_STATUS[order.status];
     if (!nextStatus) return;
 
     setUpdating(true);
+
+    let proofPhotoUrl: string | null = null;
+
+    // Upload proof photo if one was selected and we're delivering
+    if (nextStatus === "delivered" && proofPhotoUri) {
+      try {
+        const timestamp = Date.now();
+        const path = `${order.id}/${timestamp}.jpg`;
+
+        // Read the local file as raw bytes using the new expo-file-system v2 File API.
+        // fetch().blob() is unreliable for local file:// URIs on React Native.
+        const localFile = new FSFile(proofPhotoUri);
+        const bytes = await localFile.bytes();
+
+        const { error: uploadError } = await supabase.storage
+          .from("delivery-proofs")
+          .upload(path, bytes, { contentType: "image/jpeg", upsert: true });
+
+        if (uploadError) {
+          console.error("[Photo Upload] error:", uploadError);
+          showToast("Photo upload failed — delivering without proof");
+        } else {
+          const { data: urlData } = supabase.storage
+            .from("delivery-proofs")
+            .getPublicUrl(path);
+          proofPhotoUrl = urlData.publicUrl;
+        }
+      } catch (err) {
+        console.error("[Photo Upload] unexpected error:", err);
+        showToast("Photo upload failed — delivering without proof");
+      }
+    }
+
+    const updatePayload: Record<string, string | null> = {
+      status: nextStatus,
+    };
+    if (proofPhotoUrl) {
+      updatePayload.proof_photo_url = proofPhotoUrl;
+    }
+
     const { error } = await supabase
       .from("orders")
-      .update({ status: nextStatus })
+      .update(updatePayload)
       .eq("id", order.id);
 
     if (error) {
       Alert.alert("Error", "Could not update order status. Please try again.");
     } else {
       setOrder({ ...order, status: nextStatus });
+      setProofPhotoUri(null);
       showToast("Status updated!");
 
       // Stop background GPS tracking once the order is delivered
@@ -429,6 +504,31 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
       {/* Action button — hidden when delivered */}
       {!isDelivered && nextButtonLabel ? (
         <View style={styles.footer}>
+          {/* Proof photo UI — visible only when in_transit */}
+          {order.status === "in_transit" && (
+            <View style={styles.proofContainer}>
+              <TouchableOpacity
+                style={styles.proofButton}
+                onPress={handleAttachPhoto}
+                disabled={updating}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.proofButtonText}>
+                  {proofPhotoUri
+                    ? "📷 Change Proof Photo"
+                    : "📷 Attach Proof Photo"}
+                </Text>
+              </TouchableOpacity>
+              {proofPhotoUri && (
+                <Image
+                  source={{ uri: proofPhotoUri }}
+                  style={styles.proofThumbnail}
+                  resizeMode="cover"
+                />
+              )}
+            </View>
+          )}
+
           <TouchableOpacity
             style={[
               styles.actionButton,
@@ -596,4 +696,22 @@ const styles = StyleSheet.create({
   },
   navButtonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
   navButtonTextSecondary: { color: "#1E293B" },
+  // Proof photo
+  proofContainer: { marginBottom: 12, gap: 8 },
+  proofButton: {
+    backgroundColor: "#F1F5F9",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#CBD5E1",
+  },
+  proofButtonText: { color: "#1E293B", fontSize: 14, fontWeight: "600" },
+  proofThumbnail: {
+    width: "100%",
+    height: 160,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#CBD5E1",
+  },
 });

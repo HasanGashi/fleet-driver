@@ -21,6 +21,15 @@ export default ({ config }) => ({
         isAndroidForegroundServiceEnabled: true,
       },
     ],
+    [
+      "expo-image-picker",
+      {
+        photosPermission:
+          "FleetManager needs access to your photos to attach delivery proof.",
+        cameraPermission:
+          "FleetManager needs camera access to capture delivery proof photos.",
+      },
+    ],
   ],
   ios: {
     ...config.ios,
@@ -30,6 +39,10 @@ export default ({ config }) => ({
         "FleetManager needs your location to track deliveries in the background.",
       NSLocationWhenInUseUsageDescription:
         "FleetManager needs your location to show your position on the fleet map.",
+      NSPhotoLibraryUsageDescription:
+        "FleetManager needs access to your photos to attach delivery proof.",
+      NSCameraUsageDescription:
+        "FleetManager needs camera access to capture delivery proof photos.",
       UIBackgroundModes: [
         ...(config.ios?.infoPlist?.UIBackgroundModes ?? []),
         "location",
